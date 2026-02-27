@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.cache-export-spotify
+.cache-import-spotify
+
+spotify_backup.json
+spotify_import_checkpoint.json
+
+.env
+.DS_Store
