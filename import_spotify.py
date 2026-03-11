@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from typing import Dict, Optional
 
 import spotipy
@@ -88,6 +89,37 @@ def read_credential(
         return file_value
     env_value = os.getenv(env_name, "").strip()
     return env_value
+
+
+def convert_spotify_exception(error: SpotifyException) -> RuntimeError | None:
+    message = str(error)
+    premium_error = "Active premium subscription required for the owner of the app"
+    allowlist_error = "user may not be registered"
+
+    if premium_error in message:
+        return RuntimeError(
+            " ".join(
+                [
+                    "Spotify 开发模式现在要求 App 所有者账号具备有效的 Premium 订阅。",
+                    "请确认创建这个 Client ID 的账号本身就是 Premium；",
+                    "如果你刚开通或恢复订阅，请等待几小时后再重试。",
+                    "这个限制无法通过脚本绕过。",
+                ]
+            )
+        )
+
+    if allowlist_error in message:
+        return RuntimeError(
+            " ".join(
+                [
+                    "Spotify 拒绝了请求，当前账号可能还没加入测试用户。",
+                    "请检查 Spotify Developer Dashboard 的 Users and Access，",
+                    "并确认当前登录账号已被加入 allowlist。",
+                ]
+            )
+        )
+
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -427,103 +459,112 @@ def main() -> None:
 
     try:
         user = sp.current_user()
-    except SpotifyException as error:
-        if error.http_status == 403:
-            raise RuntimeError(
-                "Spotify denied access. Check Users and Access in Spotify Developer Dashboard and ensure this account is allowed."
-            ) from error
-        raise
 
-    if not user:
-        raise RuntimeError("Unable to fetch current user")
+        if not user:
+            raise RuntimeError("Unable to fetch current user")
 
-    user_id = to_text(user.get("id"))
-    if not user_id:
-        raise RuntimeError("Unable to fetch user id")
-    print(f"Import account: {to_text(user.get('display_name'), 'Unknown')} ({user_id})")
+        user_id = to_text(user.get("id"))
+        if not user_id:
+            raise RuntimeError("Unable to fetch user id")
+        print(
+            f"Import account: {to_text(user.get('display_name'), 'Unknown')} ({user_id})"
+        )
 
-    backup = read_backup(args.input)
-    playlists_raw = backup.get("playlists")
-    playlists = playlists_raw if isinstance(playlists_raw, list) else []
-    liked_tracks = read_uri_list(backup.get("liked_tracks"), "track")
-    saved_episodes = read_uri_list(backup.get("saved_episodes"), "episode")
+        backup = read_backup(args.input)
+        playlists_raw = backup.get("playlists")
+        playlists = playlists_raw if isinstance(playlists_raw, list) else []
+        liked_tracks = read_uri_list(backup.get("liked_tracks"), "track")
+        saved_episodes = read_uri_list(backup.get("saved_episodes"), "episode")
 
-    print(f"Playlists in backup: {len(playlists)}")
-    print(f"Liked tracks in backup: {len(liked_tracks)}")
-    print(f"Saved episodes in backup: {len(saved_episodes)}")
+        print(f"Playlists in backup: {len(playlists)}")
+        print(f"Liked tracks in backup: {len(liked_tracks)}")
+        print(f"Saved episodes in backup: {len(saved_episodes)}")
 
-    checkpoint = load_checkpoint(args.checkpoint)
-    completed_raw = checkpoint.get("completed")
-    completed = completed_raw if isinstance(completed_raw, dict) else {}
+        checkpoint = load_checkpoint(args.checkpoint)
+        completed_raw = checkpoint.get("completed")
+        completed = completed_raw if isinstance(completed_raw, dict) else {}
 
-    current_playlists = list_my_playlists(sp)
-    total_added = 0
-    total_skipped = 0
+        current_playlists = list_my_playlists(sp)
+        total_added = 0
+        total_skipped = 0
 
-    for index, playlist_row in enumerate(playlists):
-        if not isinstance(playlist_row, dict):
-            continue
-        name = to_text(playlist_row.get("name"), "Untitled Playlist")
-        source_id = to_text(playlist_row.get("source_id"))
-        key = make_checkpoint_key(index, name, source_id)
+        for index, playlist_row in enumerate(playlists):
+            if not isinstance(playlist_row, dict):
+                continue
+            name = to_text(playlist_row.get("name"), "Untitled Playlist")
+            source_id = to_text(playlist_row.get("source_id"))
+            key = make_checkpoint_key(index, name, source_id)
 
-        if key in completed:
-            done = completed.get(key)
-            done_added = 0
-            done_skipped = 0
-            if isinstance(done, dict):
-                done_added = to_int(done.get("added"))
-                done_skipped = to_int(done.get("skipped"))
-            total_added += done_added
-            total_skipped += done_skipped
-            print(f"Resume skip: {name} | added {done_added} | skipped {done_skipped}")
-            continue
+            if key in completed:
+                done = completed.get(key)
+                done_added = 0
+                done_skipped = 0
+                if isinstance(done, dict):
+                    done_added = to_int(done.get("added"))
+                    done_skipped = to_int(done.get("skipped"))
+                total_added += done_added
+                total_skipped += done_skipped
+                print(
+                    f"Resume skip: {name} | added {done_added} | skipped {done_skipped}"
+                )
+                continue
 
-        uris_raw = playlist_row.get("uris")
-        source_uris = uris_raw if isinstance(uris_raw, list) else []
-        item_uris = [
-            uri
-            for uri in source_uris
-            if isinstance(uri, str) and is_supported_playlist_uri(uri)
-        ]
+            uris_raw = playlist_row.get("uris")
+            source_uris = uris_raw if isinstance(uris_raw, list) else []
+            item_uris = [
+                uri
+                for uri in source_uris
+                if isinstance(uri, str) and is_supported_playlist_uri(uri)
+            ]
 
-        if not item_uris:
-            completed[key] = {"added": 0, "skipped": 0}
+            if not item_uris:
+                completed[key] = {"added": 0, "skipped": 0}
+                checkpoint["completed"] = completed
+                save_checkpoint(args.checkpoint, checkpoint)
+                print(f"Skip empty playlist: {name}")
+                continue
+
+            playlist_id = choose_or_create_playlist(
+                sp, user_id, name, current_playlists
+            )
+            existing = list_playlist_item_uris(sp, playlist_id)
+            to_add = [uri for uri in item_uris if uri not in existing]
+            skipped = len(item_uris) - len(to_add)
+
+            if to_add:
+                for batch in chunked(to_add, 100):
+                    sp.playlist_add_items(playlist_id, batch)
+
+            added = len(to_add)
+            total_added += added
+            total_skipped += skipped
+            completed[key] = {"added": added, "skipped": skipped}
             checkpoint["completed"] = completed
             save_checkpoint(args.checkpoint, checkpoint)
-            print(f"Skip empty playlist: {name}")
-            continue
+            print(f"Synced playlist: {name} | added {added} | skipped {skipped}")
 
-        playlist_id = choose_or_create_playlist(sp, user_id, name, current_playlists)
-        existing = list_playlist_item_uris(sp, playlist_id)
-        to_add = [uri for uri in item_uris if uri not in existing]
-        skipped = len(item_uris) - len(to_add)
+        liked_added, liked_skipped = restore_liked_tracks(
+            sp, liked_tracks, checkpoint, args.checkpoint
+        )
+        epi_added, epi_skipped = restore_saved_episodes(
+            sp, saved_episodes, checkpoint, args.checkpoint
+        )
 
-        if to_add:
-            for batch in chunked(to_add, 100):
-                sp.playlist_add_items(playlist_id, batch)
-
-        added = len(to_add)
-        total_added += added
-        total_skipped += skipped
-        completed[key] = {"added": added, "skipped": skipped}
-        checkpoint["completed"] = completed
-        save_checkpoint(args.checkpoint, checkpoint)
-        print(f"Synced playlist: {name} | added {added} | skipped {skipped}")
-
-    liked_added, liked_skipped = restore_liked_tracks(
-        sp, liked_tracks, checkpoint, args.checkpoint
-    )
-    epi_added, epi_skipped = restore_saved_episodes(
-        sp, saved_episodes, checkpoint, args.checkpoint
-    )
-
-    print("Done")
-    print(f"Playlist items added: {total_added}")
-    print(f"Playlist items skipped: {total_skipped}")
-    print(f"Liked tracks added: {liked_added} | skipped: {liked_skipped}")
-    print(f"Saved episodes added: {epi_added} | skipped: {epi_skipped}")
+        print("Done")
+        print(f"Playlist items added: {total_added}")
+        print(f"Playlist items skipped: {total_skipped}")
+        print(f"Liked tracks added: {liked_added} | skipped: {liked_skipped}")
+        print(f"Saved episodes added: {epi_added} | skipped: {epi_skipped}")
+    except SpotifyException as error:
+        friendly_error = convert_spotify_exception(error)
+        if friendly_error is not None:
+            raise friendly_error from error
+        raise
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error

@@ -5,7 +5,7 @@
 ## 5 分钟上手 🚀
 
 1. 安装依赖（见下方“安装”章节）。
-2. 去 Spotify 开发者后台创建 App，并配置 `https://example.com/callback`。
+2. 确保创建 App 的 Spotify 账号本身有有效 Premium，再去 Spotify 开发者后台创建 App，并配置 `https://example.com/callback`。
 3. 复制 `.env.example` 为 `.env`，填入 Client ID / Client Secret。
 4. 运行导出脚本并登录 A 账号。
 5. 运行导入脚本并登录 B 账号。
@@ -22,6 +22,7 @@
 
 - Spotify 官方 API 不支持歌单文件夹层级迁移。
 - 迁移后歌单会在目标账号根目录，需要手动整理文件夹。
+- 如果看到 `Active premium subscription required for the owner of the app`，说明开发模式 App 的所有者账号缺少有效 Premium。
 
 ## 运行环境 🧱
 
@@ -61,12 +62,16 @@ py -m pip install -r requirements.txt
 3. 填写：
    - App name：任意
    - App description：任意
-4. 在 `Redirect URIs` 添加：
-   - `https://example.com/callback`
-5. 保存后进入 `Settings`，复制：
-   - `Client ID`
-   - `Client secret`
-6. 在 `Users and Access` 添加你要登录的账号邮箱（开发模式必须）。
+4. 确认创建这个 App 的 Spotify 账号是 Premium。
+5. 在 `Redirect URIs` 添加：
+    - `https://example.com/callback`
+6. 保存后进入 `Settings`，复制：
+    - `Client ID`
+    - `Client secret`
+7. 打开 Spotify for Developers Dashboard 里的项目页面，进入 `User Management`（有些界面显示为 `Users and Access`）。
+8. 点击 `Add user`，把你自己要登录和测试的 Spotify 账号邮箱加进去（开发模式必须）。
+
+如果你刚开通或恢复 Premium，但仍收到 `Active premium subscription required for the owner of the app`，通常要等几小时再重试。
 
 ## 3. 配置 `.env` 文件 🔐
 
@@ -146,15 +151,21 @@ py import_spotify.py --show-dialog
 
 ### 1) 403 / user may not be registered 🚫
 
-- 确认 Developer Dashboard 的 `Users and Access` 已添加当前账号邮箱。
+- 确认 Spotify for Developers Dashboard 的项目页面里，`User Management`（或 `Users and Access`）已经通过 `Add user` 添加了当前账号邮箱。
 - 确认脚本使用的 Client ID 就是你刚配置的那个 App。
 
-### 2) 歌单里有播客，但 saved episodes 是 0 🎙️
+### 2) 403 / Active premium subscription required for the owner of the app 💳
+
+- 这是 Spotify 2026 开发模式的新限制，不是脚本参数问题。
+- 创建这个 App 的 Spotify 账号本身必须有有效 Premium。
+- 如果你刚开通或恢复 Premium，等待几小时后再试。
+
+### 3) 歌单里有播客，但 saved episodes 是 0 🎙️
 
 - 正常现象。
 - `saved_episodes` 统计的是库里点过“保存”的播客单集，不等于“播客歌单里的条目数量”。
 
-### 3) 如何从头再导一次 🔁
+### 4) 如何从头再导一次 🔁
 
 删除以下文件后重跑：
 

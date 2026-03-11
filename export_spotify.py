@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 from typing import Dict, Optional
 
 import spotipy
@@ -50,6 +51,37 @@ def read_credential(
     return env_value
 
 
+def convert_spotify_exception(error: SpotifyException) -> RuntimeError | None:
+    message = str(error)
+    premium_error = "Active premium subscription required for the owner of the app"
+    allowlist_error = "user may not be registered"
+
+    if premium_error in message:
+        return RuntimeError(
+            " ".join(
+                [
+                    "Spotify 开发模式现在要求 App 所有者账号具备有效的 Premium 订阅。",
+                    "请确认创建这个 Client ID 的账号本身就是 Premium；",
+                    "如果你刚开通或恢复订阅，请等待几小时后再重试。",
+                    "这个限制无法通过脚本绕过。",
+                ]
+            )
+        )
+
+    if allowlist_error in message:
+        return RuntimeError(
+            " ".join(
+                [
+                    "Spotify 拒绝了请求，当前账号可能还没加入测试用户。",
+                    "请检查 Spotify Developer Dashboard 的 Users and Access，",
+                    "并确认当前登录账号已被加入 allowlist。",
+                ]
+            )
+        )
+
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export Spotify playlists and library data"
@@ -95,186 +127,193 @@ def main() -> None:
 
     try:
         user = sp.current_user()
-    except SpotifyException as error:
-        if error.http_status == 403:
-            raise RuntimeError(
-                "Spotify denied access. Check Users and Access in Spotify Developer Dashboard and ensure this account is allowed."
-            ) from error
-        raise
 
-    if not user:
-        raise RuntimeError("Unable to fetch current user")
+        if not user:
+            raise RuntimeError("Unable to fetch current user")
 
-    print(
-        f"Logged in as: {to_text(user.get('display_name'), 'Unknown')} ({to_text(user.get('id'), 'Unknown')})"
-    )
+        print(
+            f"Logged in as: {to_text(user.get('display_name'), 'Unknown')} ({to_text(user.get('id'), 'Unknown')})"
+        )
 
-    backup: dict[str, object] = {
-        "meta": {"format_version": 2},
-        "playlists": [],
-        "liked_tracks": [],
-        "saved_episodes": [],
-    }
-    playlist_list: list[dict[str, object]] = []
-    backup["playlists"] = playlist_list
-    playlist_episode_count = 0
+        backup: dict[str, object] = {
+            "meta": {"format_version": 2},
+            "playlists": [],
+            "liked_tracks": [],
+            "saved_episodes": [],
+        }
+        playlist_list: list[dict[str, object]] = []
+        backup["playlists"] = playlist_list
+        playlist_episode_count = 0
 
-    playlists = sp.current_user_playlists(limit=50)
-    while playlists:
-        items = playlists.get("items") if isinstance(playlists, dict) else None
-        current_items = items if isinstance(items, list) else []
+        playlists = sp.current_user_playlists(limit=50)
+        while playlists:
+            items = playlists.get("items") if isinstance(playlists, dict) else None
+            current_items = items if isinstance(items, list) else []
 
-        for playlist in current_items:
-            if not isinstance(playlist, dict):
-                continue
-            playlist_id = to_text(playlist.get("id"))
-            playlist_name = to_text(playlist.get("name"), "Untitled Playlist")
-            if not playlist_id:
-                continue
+            for playlist in current_items:
+                if not isinstance(playlist, dict):
+                    continue
+                playlist_id = to_text(playlist.get("id"))
+                playlist_name = to_text(playlist.get("name"), "Untitled Playlist")
+                if not playlist_id:
+                    continue
 
-            print(f"Exporting playlist: {playlist_name}")
-            playlist_data: dict[str, object] = {
-                "name": playlist_name,
-                "id": playlist_id,
-                "tracks": [],
-            }
+                print(f"Exporting playlist: {playlist_name}")
+                playlist_data: dict[str, object] = {
+                    "name": playlist_name,
+                    "id": playlist_id,
+                    "tracks": [],
+                }
 
-            page = sp.playlist_items(
-                playlist_id,
-                fields="items(track(uri,name,type,artists(name),show(name))),next",
-                additional_types=("track", "episode"),
-                limit=100,
-            )
-            collected: list[object] = []
-            while page:
-                page_items = page.get("items") if isinstance(page, dict) else None
-                if isinstance(page_items, list):
-                    collected.extend(page_items)
-                next_url = page.get("next") if isinstance(page, dict) else None
-                if next_url:
-                    next_page = sp.next(page)
-                    if not next_page:
+                page = sp.playlist_items(
+                    playlist_id,
+                    fields="items(track(uri,name,type,artists(name),show(name))),next",
+                    additional_types=("track", "episode"),
+                    limit=100,
+                )
+                collected: list[object] = []
+                while page:
+                    page_items = page.get("items") if isinstance(page, dict) else None
+                    if isinstance(page_items, list):
+                        collected.extend(page_items)
+                    next_url = page.get("next") if isinstance(page, dict) else None
+                    if next_url:
+                        next_page = sp.next(page)
+                        if not next_page:
+                            break
+                        page = next_page
+                    else:
                         break
-                    page = next_page
-                else:
-                    break
 
-            track_rows: list[dict[str, str]] = []
-            for row in collected:
+                track_rows: list[dict[str, str]] = []
+                for row in collected:
+                    if not isinstance(row, dict):
+                        continue
+                    track = row.get("track")
+                    if not isinstance(track, dict):
+                        continue
+                    uri = to_text(track.get("uri"))
+                    if not uri or not is_supported_uri(uri):
+                        continue
+                    item_type = to_text(track.get("type"), "track")
+                    name = to_text(track.get("name"), "Unknown")
+
+                    author = "Unknown"
+                    if item_type == "episode":
+                        show_obj = track.get("show")
+                        if isinstance(show_obj, dict):
+                            author = to_text(show_obj.get("name"), "Unknown Show")
+                        playlist_episode_count += 1
+                    else:
+                        artists = track.get("artists")
+                        if isinstance(artists, list) and artists:
+                            first = artists[0]
+                            if isinstance(first, dict):
+                                author = to_text(first.get("name"), "Unknown")
+
+                    track_rows.append(
+                        {
+                            "name": name,
+                            "artist": author,
+                            "uri": uri,
+                            "type": item_type,
+                        }
+                    )
+
+                playlist_data["tracks"] = track_rows
+                playlist_list.append(playlist_data)
+
+            next_url = playlists.get("next") if isinstance(playlists, dict) else None
+            if next_url:
+                next_page = sp.next(playlists)
+                if not next_page:
+                    break
+                playlists = next_page
+            else:
+                break
+
+        liked_uris: list[str] = []
+        liked_seen: set[str] = set()
+        liked_page = sp.current_user_saved_tracks(limit=50)
+        while liked_page:
+            items = liked_page.get("items") if isinstance(liked_page, dict) else None
+            rows = items if isinstance(items, list) else []
+            for row in rows:
                 if not isinstance(row, dict):
                     continue
                 track = row.get("track")
                 if not isinstance(track, dict):
                     continue
                 uri = to_text(track.get("uri"))
-                if not uri or not is_supported_uri(uri):
+                if not uri.startswith("spotify:track:"):
                     continue
-                item_type = to_text(track.get("type"), "track")
-                name = to_text(track.get("name"), "Unknown")
-
-                author = "Unknown"
-                if item_type == "episode":
-                    show_obj = track.get("show")
-                    if isinstance(show_obj, dict):
-                        author = to_text(show_obj.get("name"), "Unknown Show")
-                    playlist_episode_count += 1
-                else:
-                    artists = track.get("artists")
-                    if isinstance(artists, list) and artists:
-                        first = artists[0]
-                        if isinstance(first, dict):
-                            author = to_text(first.get("name"), "Unknown")
-
-                track_rows.append(
-                    {
-                        "name": name,
-                        "artist": author,
-                        "uri": uri,
-                        "type": item_type,
-                    }
-                )
-
-            playlist_data["tracks"] = track_rows
-            playlist_list.append(playlist_data)
-
-        next_url = playlists.get("next") if isinstance(playlists, dict) else None
-        if next_url:
-            next_page = sp.next(playlists)
-            if not next_page:
+                if uri in liked_seen:
+                    continue
+                liked_seen.add(uri)
+                liked_uris.append(uri)
+            next_url = liked_page.get("next") if isinstance(liked_page, dict) else None
+            if next_url:
+                next_page = sp.next(liked_page)
+                if not next_page:
+                    break
+                liked_page = next_page
+            else:
                 break
-            playlists = next_page
-        else:
-            break
 
-    liked_uris: list[str] = []
-    liked_seen: set[str] = set()
-    liked_page = sp.current_user_saved_tracks(limit=50)
-    while liked_page:
-        items = liked_page.get("items") if isinstance(liked_page, dict) else None
-        rows = items if isinstance(items, list) else []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            track = row.get("track")
-            if not isinstance(track, dict):
-                continue
-            uri = to_text(track.get("uri"))
-            if not uri.startswith("spotify:track:"):
-                continue
-            if uri in liked_seen:
-                continue
-            liked_seen.add(uri)
-            liked_uris.append(uri)
-        next_url = liked_page.get("next") if isinstance(liked_page, dict) else None
-        if next_url:
-            next_page = sp.next(liked_page)
-            if not next_page:
+        episode_uris: list[str] = []
+        episode_seen: set[str] = set()
+        episode_page = sp.current_user_saved_episodes(limit=50)
+        while episode_page:
+            items = (
+                episode_page.get("items") if isinstance(episode_page, dict) else None
+            )
+            rows = items if isinstance(items, list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                episode = row.get("episode")
+                if not isinstance(episode, dict):
+                    continue
+                uri = to_text(episode.get("uri"))
+                if not uri.startswith("spotify:episode:"):
+                    continue
+                if uri in episode_seen:
+                    continue
+                episode_seen.add(uri)
+                episode_uris.append(uri)
+            next_url = (
+                episode_page.get("next") if isinstance(episode_page, dict) else None
+            )
+            if next_url:
+                next_page = sp.next(episode_page)
+                if not next_page:
+                    break
+                episode_page = next_page
+            else:
                 break
-            liked_page = next_page
-        else:
-            break
 
-    episode_uris: list[str] = []
-    episode_seen: set[str] = set()
-    episode_page = sp.current_user_saved_episodes(limit=50)
-    while episode_page:
-        items = episode_page.get("items") if isinstance(episode_page, dict) else None
-        rows = items if isinstance(items, list) else []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            episode = row.get("episode")
-            if not isinstance(episode, dict):
-                continue
-            uri = to_text(episode.get("uri"))
-            if not uri.startswith("spotify:episode:"):
-                continue
-            if uri in episode_seen:
-                continue
-            episode_seen.add(uri)
-            episode_uris.append(uri)
-        next_url = episode_page.get("next") if isinstance(episode_page, dict) else None
-        if next_url:
-            next_page = sp.next(episode_page)
-            if not next_page:
-                break
-            episode_page = next_page
-        else:
-            break
+        backup["liked_tracks"] = liked_uris
+        backup["saved_episodes"] = episode_uris
 
-    backup["liked_tracks"] = liked_uris
-    backup["saved_episodes"] = episode_uris
+        with open(args.output, "w", encoding="utf-8") as file:
+            json.dump(backup, file, ensure_ascii=False, indent=2)
 
-    with open(args.output, "w", encoding="utf-8") as file:
-        json.dump(backup, file, ensure_ascii=False, indent=2)
-
-    print("Done")
-    print(f"Backup file: {args.output}")
-    print(f"Playlists exported: {len(playlist_list)}")
-    print(f"Episodes found inside playlists: {playlist_episode_count}")
-    print(f"Liked tracks exported: {len(liked_uris)}")
-    print(f"Saved episodes exported from library: {len(episode_uris)}")
+        print("Done")
+        print(f"Backup file: {args.output}")
+        print(f"Playlists exported: {len(playlist_list)}")
+        print(f"Episodes found inside playlists: {playlist_episode_count}")
+        print(f"Liked tracks exported: {len(liked_uris)}")
+        print(f"Saved episodes exported from library: {len(episode_uris)}")
+    except SpotifyException as error:
+        friendly_error = convert_spotify_exception(error)
+        if friendly_error is not None:
+            raise friendly_error from error
+        raise
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
